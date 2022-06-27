@@ -8,7 +8,13 @@ use rusqlite::{
 };
 use serde_derive::{Deserialize, Serialize};
 
-use crate::{prelude::*, storage::SqliteStorage};
+use super::ankidroid::backend_id;
+use crate::{
+    pb,
+    pb::{sql_value::Data, DbResponse, DbResult as ProtoDbResult, Row, SqlValue as pb_SqlValue},
+    prelude::*,
+    storage::SqliteStorage,
+};
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -54,6 +60,42 @@ impl ToSql for SqlValue {
             SqlValue::Blob(v) => ValueRef::Blob(v),
         };
         Ok(ToSqlOutput::Borrowed(val))
+    }
+}
+
+impl From<&SqlValue> for pb::SqlValue {
+    fn from(item: &SqlValue) -> Self {
+        match item {
+            SqlValue::Null => pb_SqlValue { data: Option::None },
+            SqlValue::String(s) => pb_SqlValue {
+                data: Some(Data::StringValue(s.to_string())),
+            },
+            SqlValue::Int(i) => pb_SqlValue {
+                data: Some(Data::LongValue(*i)),
+            },
+            SqlValue::Double(d) => pb_SqlValue {
+                data: Some(Data::DoubleValue(*d)),
+            },
+            SqlValue::Blob(b) => pb_SqlValue {
+                data: Some(Data::BlobValue(b.clone())),
+            },
+        }
+    }
+}
+
+impl From<&Vec<SqlValue>> for pb::Row {
+    fn from(item: &Vec<SqlValue>) -> Self {
+        Row {
+            fields: item.iter().map(pb::SqlValue::from).collect(),
+        }
+    }
+}
+
+impl From<&Vec<Vec<SqlValue>>> for pb::DbResult {
+    fn from(item: &Vec<Vec<SqlValue>>) -> Self {
+        ProtoDbResult {
+            rows: item.iter().map(Row::from).collect(),
+        }
     }
 }
 
@@ -126,6 +168,51 @@ fn is_dql(sql: &str) -> bool {
         .map(|c| c.to_ascii_lowercase())
         .collect();
     head.starts_with("select")
+}
+
+pub(crate) fn db_command_proto(col: &Collection, input: &[u8]) -> Result<DbResponse> {
+    let result = db_command_proto_inner(&col.storage, input)?;
+    let trimmed = super::ankidroid::db::trim_and_cache_remaining(
+        backend_id(col),
+        result,
+        super::ankidroid::db::next_sequence_number(),
+    );
+    Ok(trimmed)
+}
+
+fn db_command_proto_inner(ctx: &SqliteStorage, input: &[u8]) -> Result<ProtoDbResult> {
+    let req: DbRequest = serde_json::from_slice(input)?;
+    let resp = match req {
+        DbRequest::Query {
+            sql,
+            args,
+            first_row_only,
+        } => {
+            if first_row_only {
+                db_query_row(ctx, &sql, &args)?
+            } else {
+                db_query(ctx, &sql, &args)?
+            }
+        }
+        DbRequest::Begin => {
+            ctx.begin_trx()?;
+            DbResult::None
+        }
+        DbRequest::Commit => {
+            ctx.commit_trx()?;
+            DbResult::None
+        }
+        DbRequest::Rollback => {
+            ctx.rollback_trx()?;
+            DbResult::None
+        }
+        DbRequest::ExecuteMany { sql, args } => db_execute_many(ctx, &sql, &args)?,
+    };
+    let proto_resp = match resp {
+        DbResult::None => ProtoDbResult { rows: Vec::new() },
+        DbResult::Rows(rows) => ProtoDbResult::from(&rows),
+    };
+    Ok(proto_resp)
 }
 
 pub(super) fn db_query_row(ctx: &SqliteStorage, sql: &str, args: &[SqlValue]) -> Result<DbResult> {
