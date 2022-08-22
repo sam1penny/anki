@@ -840,11 +840,11 @@ def maybeHideClose(bbox: QDialogButtonBox) -> None:
             bbox.removeButton(b)
 
 
-def addCloseShortcut(widg: QDialog) -> None:
+def addCloseShortcut(widg: QWidget) -> None:
     if not is_mac:
         return
     shortcut = QShortcut(QKeySequence("Ctrl+W"), widg)
-    qconnect(shortcut.activated, widg.reject)
+    qconnect(shortcut.activated, widg.close)
     setattr(widg, "_closeShortcut", shortcut)
 
 
